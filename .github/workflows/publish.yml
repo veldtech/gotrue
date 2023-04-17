@@ -2,14 +2,9 @@ name: Publish to Image Registry
 
 on:
   push:
-    tags:
-      - "v*"
-  workflow_call:
-    inputs:
-      version:
-        required: true
-        type: string
-
+    branches: 
+      - master
+      
 jobs:
   publish:
     runs-on: ubuntu-latest
