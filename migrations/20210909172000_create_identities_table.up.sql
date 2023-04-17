@@ -1,6 +1,5 @@
 -- adds identities table 
-
-CREATE TABLE IF NOT EXISTS {{ index .Options "Namespace" }}.identities (
+CREATE TABLE IF NOT EXISTS identities (
     id text NOT NULL,
     user_id uuid NOT NULL,
     identity_data JSONB NOT NULL,
@@ -9,6 +8,6 @@ CREATE TABLE IF NOT EXISTS {{ index .Options "Namespace" }}.identities (
     created_at timestamptz NULL,
     updated_at timestamptz NULL,
     CONSTRAINT identities_pkey PRIMARY KEY (provider, id),
-    CONSTRAINT identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES {{ index .Options "Namespace" }}.users(id) ON DELETE CASCADE
+    CONSTRAINT identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
-COMMENT ON TABLE {{ index .Options "Namespace" }}.identities is 'Auth: Stores identities associated to a user.';
+COMMENT ON TABLE identities is 'Auth: Stores identities associated to a user.';

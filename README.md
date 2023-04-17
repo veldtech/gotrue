@@ -262,10 +262,6 @@ Connection string for the database.
 
 Sets the maximum number of open connections to the database. Defaults to 0 which is equivalent to an "unlimited" number of connections.
 
-`DB_NAMESPACE` - `string`
-
-Adds a prefix to all table names.
-
 **Migrations Note**
 
 Migrations are applied automatically when you run `./gotrue`. However, you also have the option to rerun the migrations via the following methods:

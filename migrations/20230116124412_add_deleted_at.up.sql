@@ -1,4 +1,3 @@
--- adds deleted_at column to auth.users 
-
-alter table {{ index .Options "Namespace" }}.users 
+-- adds deleted_at column to users 
+alter table users
 add column if not exists deleted_at timestamptz null;

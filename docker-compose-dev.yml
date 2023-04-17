@@ -28,7 +28,5 @@ services:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=root
       - POSTGRES_DB=postgres
-      # sets the schema name, this should match the `NAMESPACE` env var set in your .env file
-      - DB_NAMESPACE=auth 
 volumes:
   postgres_data:

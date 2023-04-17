@@ -1,4 +1,3 @@
 -- adds banned_until column
-
-ALTER TABLE {{ index .Options "Namespace" }}.users
+ALTER TABLE users
 ADD COLUMN IF NOT EXISTS banned_until timestamptz NULL;

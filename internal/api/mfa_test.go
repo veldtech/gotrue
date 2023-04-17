@@ -237,7 +237,7 @@ func (ts *MFATestSuite) TestMFAVerifyFactor() {
 				// Set challenge creation so that it has expired in present time.
 				newCreatedAt := time.Now().UTC().Add(-1 * time.Second * time.Duration(ts.Config.MFA.ChallengeExpiryDuration+1))
 				// created_at is managed by buffalo(ORM) needs to be raw query to be updated
-				err := ts.API.db.RawQuery("UPDATE auth.mfa_challenges SET created_at = ? WHERE factor_id = ?", newCreatedAt, f.ID).Exec()
+				err := ts.API.db.RawQuery("UPDATE mfa_challenges SET created_at = ? WHERE factor_id = ?", newCreatedAt, f.ID).Exec()
 				require.NoError(ts.T(), err, "Error updating new test challenge")
 			}
 

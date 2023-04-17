@@ -11,9 +11,6 @@
     "GOTRUE_DB_AUTOMIGRATE": {
       "value": true
     },
-    "GOTRUE_DB_NAMESPACE": {
-      "value": "auth"
-    },
     "GOTRUE_JWT_SECRET": {
       "required": true
     },
