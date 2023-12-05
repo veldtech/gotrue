@@ -1,2 +1,2 @@
-alter table if exists {{ index .Options "Namespace" }}.sessions
+alter table if exists sessions
   add column if not exists tag text;
