@@ -26,12 +26,13 @@ type discordUser struct {
 	Email         string `json:"email"`
 	ID            string `json:"id"`
 	Name          string `json:"username"`
+	GlobalName    string `json:"global_name"`
 	Verified      bool   `json:"verified"`
 }
 
 // NewDiscordProvider creates a Discord account provider.
 func NewDiscordProvider(ext conf.OAuthProviderConfiguration, scopes string) (OAuthProvider, error) {
-	if err := ext.Validate(); err != nil {
+	if err := ext.ValidateOAuth(); err != nil {
 		return nil, err
 	}
 
@@ -48,7 +49,7 @@ func NewDiscordProvider(ext conf.OAuthProviderConfiguration, scopes string) (OAu
 
 	return &discordProvider{
 		Config: &oauth2.Config{
-			ClientID:     ext.ClientID,
+			ClientID:     ext.ClientID[0],
 			ClientSecret: ext.Secret,
 			Endpoint: oauth2.Endpoint{
 				AuthURL:  apiPath + "/oauth2/authorize",
@@ -104,6 +105,9 @@ func (g discordProvider) GetUserData(ctx context.Context, tok *oauth2.Token) (*U
 			Picture:       avatarURL,
 			Email:         u.Email,
 			EmailVerified: u.Verified,
+			CustomClaims: map[string]interface{}{
+				"global_name": u.GlobalName,
+			},
 
 			// To be deprecated
 			AvatarURL:  avatarURL,

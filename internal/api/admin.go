@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -144,7 +143,6 @@ func (a *API) adminUserUpdate(w http.ResponseWriter, r *http.Request) error {
 	user := getUser(ctx)
 	adminUser := getAdminUser(ctx)
 	params, err := a.getAdminParams(r)
-	config := a.config
 	if err != nil {
 		return err
 	}
@@ -176,6 +174,18 @@ func (a *API) adminUserUpdate(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
+	if params.Password != nil {
+		password := *params.Password
+
+		if err := a.checkPasswordStrength(ctx, password); err != nil {
+			return err
+		}
+
+		if err := user.SetPassword(ctx, password); err != nil {
+			return err
+		}
+	}
+
 	err = db.Transaction(func(tx *storage.Connection) error {
 		if params.Role != "" {
 			if terr := user.SetRole(tx, params.Role); terr != nil {
@@ -196,11 +206,7 @@ func (a *API) adminUserUpdate(w http.ResponseWriter, r *http.Request) error {
 		}
 
 		if params.Password != nil {
-			if len(*params.Password) < config.PasswordMinLength {
-				return invalidPasswordLengthError(config.PasswordMinLength)
-			}
-
-			if terr := user.UpdatePassword(tx, *params.Password); terr != nil {
+			if terr := user.UpdatePassword(tx, nil); terr != nil {
 				return terr
 			}
 		}
@@ -284,9 +290,6 @@ func (a *API) adminUserUpdate(w http.ResponseWriter, r *http.Request) error {
 	})
 
 	if err != nil {
-		if errors.Is(err, invalidPasswordLengthError(config.PasswordMinLength)) {
-			return err
-		}
 		return internalServerError("Error updating user").WithInternalError(err)
 	}
 
@@ -320,7 +323,7 @@ func (a *API) adminUserCreate(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		if user, err := models.IsDuplicatedEmail(db, params.Email, aud); err != nil {
+		if user, err := models.IsDuplicatedEmail(db, params.Email, aud, nil); err != nil {
 			return internalServerError("Database error checking email").WithInternalError(err)
 		} else if user != nil {
 			return unprocessableEntityError(DuplicateEmailMsg)
@@ -458,10 +461,6 @@ func (a *API) adminUserDelete(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	user := getUser(ctx)
 	adminUser := getAdminUser(ctx)
-
-	if user.IsSSOUser {
-		return badRequestError("user should be removed via identity provider instead")
-	}
 
 	var err error
 	params := &adminUserDeleteParams{}

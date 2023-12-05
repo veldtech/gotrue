@@ -7,6 +7,7 @@ import (
 
 	"github.com/supabase/gotrue/internal/models"
 	"github.com/supabase/gotrue/internal/storage"
+	"github.com/supabase/gotrue/internal/utilities"
 )
 
 // RecoverParams holds the parameters for a password recovery request
@@ -67,7 +68,7 @@ func (a *API) Recover(w http.ResponseWriter, r *http.Request) error {
 			return terr
 		}
 		mailer := a.Mailer(ctx)
-		referrer := a.getReferrer(r)
+		referrer := utilities.GetReferrer(r, config)
 		if isPKCEFlow(flowType) {
 			codeChallengeMethod, terr := models.ParseCodeChallengeMethod(params.CodeChallengeMethod)
 			if terr != nil {
@@ -77,7 +78,8 @@ func (a *API) Recover(w http.ResponseWriter, r *http.Request) error {
 				return terr
 			}
 		}
-		return a.sendPasswordRecovery(tx, user, mailer, config.SMTP.MaxFrequency, referrer, config.Mailer.OtpLength, flowType)
+		externalURL := getExternalHost(ctx)
+		return a.sendPasswordRecovery(tx, user, mailer, config.SMTP.MaxFrequency, referrer, externalURL, config.Mailer.OtpLength, flowType)
 	})
 	if err != nil {
 		if errors.Is(err, MaxFrequencyLimitError) {

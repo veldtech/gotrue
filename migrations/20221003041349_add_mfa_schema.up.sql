@@ -41,4 +41,4 @@ create table if not exists mfa_amr_claims(
     constraint mfa_amr_claims_session_id_authentication_method_pkey unique(session_id, authentication_method),
     constraint mfa_amr_claims_session_id_fkey foreign key(session_id) references sessions(id) on delete cascade
 );
-comment on table mfa_amr_claims is 'auth: stores authenticator method reference claims for multi factor authentication';
+comment on table auth.mfa_amr_claims is 'auth: stores authenticator method reference claims for multi factor authentication';
