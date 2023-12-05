@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"time"
 
@@ -71,21 +72,29 @@ type User struct {
 
 // NewUser initializes a new user from an email, password and user data.
 func NewUser(phone, email, password, aud string, userData map[string]interface{}) (*User, error) {
-	id := uuid.Must(uuid.NewV4())
-	pw, err := crypto.GenerateFromPassword(context.Background(), password)
-	if err != nil {
-		return nil, err
+	passwordHash := ""
+
+	if password != "" {
+		pw, err := crypto.GenerateFromPassword(context.Background(), password)
+		if err != nil {
+			return nil, err
+		}
+
+		passwordHash = pw
 	}
+
 	if userData == nil {
 		userData = make(map[string]interface{})
 	}
+
+	id := uuid.Must(uuid.NewV4())
 	user := &User{
 		ID:                id,
 		Aud:               aud,
 		Email:             storage.NullString(strings.ToLower(email)),
 		Phone:             storage.NullString(phone),
 		UserMetaData:      userData,
-		EncryptedPassword: pw,
+		EncryptedPassword: passwordHash,
 	}
 	return user, nil
 }
@@ -135,6 +144,11 @@ func (u *User) BeforeSave(tx *pop.Connection) error {
 // registered and confirmed.
 func (u *User) IsConfirmed() bool {
 	return u.EmailConfirmedAt != nil
+}
+
+// HasBeenInvited checks if user has been invited
+func (u *User) HasBeenInvited() bool {
+	return u.InvitedAt != nil
 }
 
 // IsPhoneConfirmed checks if a user's phone has already been
@@ -204,9 +218,48 @@ func (u *User) UpdateAppMetaDataProviders(tx *storage.Connection) error {
 	if terr != nil {
 		return terr
 	}
-	return u.UpdateAppMetaData(tx, map[string]interface{}{
+	payload := map[string]interface{}{
 		"providers": providers,
-	})
+	}
+	if len(providers) > 0 {
+		payload["provider"] = providers[0]
+	}
+	return u.UpdateAppMetaData(tx, payload)
+}
+
+// UpdateUserEmail updates the user's email to one of the identity's email
+// if the current email used doesn't match any of the identities email
+func (u *User) UpdateUserEmail(tx *storage.Connection) error {
+	identities, terr := FindIdentitiesByUserID(tx, u.ID)
+	if terr != nil {
+		return terr
+	}
+	for _, i := range identities {
+		if u.GetEmail() == i.GetEmail() {
+			// there's an existing identity that uses the same email
+			// so the user's email can be kept
+			return nil
+		}
+	}
+
+	var primaryIdentity *Identity
+	for _, i := range identities {
+		if _, terr := FindUserByEmailAndAudience(tx, i.GetEmail(), u.Aud); terr != nil {
+			if IsNotFoundError(terr) {
+				primaryIdentity = i
+				break
+			}
+			return terr
+		}
+	}
+	if primaryIdentity == nil {
+		return UserEmailUniqueConflictError{}
+	}
+	// default to the first identity's email
+	if terr := u.SetEmail(tx, primaryIdentity.GetEmail()); terr != nil {
+		return terr
+	}
+	return nil
 }
 
 // SetEmail sets the user's email
@@ -221,14 +274,35 @@ func (u *User) SetPhone(tx *storage.Connection, phone string) error {
 	return tx.UpdateOnly(u, "phone")
 }
 
-// UpdatePassword updates the user's password
-func (u *User) UpdatePassword(tx *storage.Connection, password string) error {
-	pw, err := crypto.GenerateFromPassword(context.Background(), password)
+func (u *User) SetPassword(ctx context.Context, password string) error {
+	if password == "" {
+		u.EncryptedPassword = ""
+		return nil
+	}
+
+	pw, err := crypto.GenerateFromPassword(ctx, password)
 	if err != nil {
 		return err
 	}
+
 	u.EncryptedPassword = pw
-	return tx.UpdateOnly(u, "encrypted_password")
+
+	return nil
+}
+
+// UpdatePassword updates the user's password. Use SetPassword outside of a transaction first!
+func (u *User) UpdatePassword(tx *storage.Connection, sessionID *uuid.UUID) error {
+	if err := tx.UpdateOnly(u, "encrypted_password"); err != nil {
+		return err
+	}
+
+	if sessionID == nil {
+		// log out user from all sessions to ensure reauthentication after password change
+		return Logout(tx, u.ID)
+	} else {
+		// log out user from all other sessions to ensure reauthentication after password change
+		return LogoutAllExceptMe(tx, *sessionID, u.ID)
+	}
 }
 
 // UpdatePhone updates the user's phone
@@ -238,8 +312,8 @@ func (u *User) UpdatePhone(tx *storage.Connection, phone string) error {
 }
 
 // Authenticate a user from a password
-func (u *User) Authenticate(password string) bool {
-	err := crypto.CompareHashAndPassword(context.Background(), u.EncryptedPassword, password)
+func (u *User) Authenticate(ctx context.Context, password string) bool {
+	err := crypto.CompareHashAndPassword(ctx, u.EncryptedPassword, password)
 	return err == nil
 }
 
@@ -382,6 +456,15 @@ func findUser(tx *storage.Connection, query string, args ...interface{}) (*User,
 }
 
 // FindUserByConfirmationToken finds users with the matching confirmation token.
+func FindUserByConfirmationOrRecoveryToken(tx *storage.Connection, token string) (*User, error) {
+	user, err := findUser(tx, "(confirmation_token = ? or recovery_token = ?) and is_sso_user = false", token, token)
+	if err != nil {
+		return nil, ConfirmationOrRecoveryTokenNotFoundError{}
+	}
+	return user, nil
+}
+
+// FindUserByConfirmationToken finds users with the matching confirmation token.
 func FindUserByConfirmationToken(tx *storage.Connection, token string) (*User, error) {
 	user, err := findUser(tx, "confirmation_token = ? and is_sso_user = false", token)
 	if err != nil {
@@ -415,9 +498,29 @@ func FindUserByEmailChangeToken(tx *storage.Connection, token string) (*User, er
 	return findUser(tx, "is_sso_user = false and (email_change_token_current = ? or email_change_token_new = ?)", token, token)
 }
 
-// FindUserWithRefreshToken finds a user from the provided refresh token.
-func FindUserWithRefreshToken(tx *storage.Connection, token string) (*User, *RefreshToken, *Session, error) {
+// FindUserWithRefreshToken finds a user from the provided refresh token. If
+// forUpdate is set to true, then the SELECT statement used by the query has
+// the form SELECT ... FOR UPDATE SKIP LOCKED. This means that a FOR UPDATE
+// lock will only be acquired if there's no other lock. In case there is a
+// lock, a IsNotFound(err) error will be returned.
+func FindUserWithRefreshToken(tx *storage.Connection, token string, forUpdate bool) (*User, *RefreshToken, *Session, error) {
 	refreshToken := &RefreshToken{}
+
+	if forUpdate {
+		// pop does not provide us with a way to execute FOR UPDATE
+		// queries which lock the rows affected by the query from
+		// being accessed by any other transaction that also uses FOR
+		// UPDATE
+		if err := tx.RawQuery(fmt.Sprintf("SELECT * FROM %q WHERE token = ? LIMIT 1 FOR UPDATE SKIP LOCKED;", refreshToken.TableName()), token).First(refreshToken); err != nil {
+			if errors.Cause(err) == sql.ErrNoRows {
+				return nil, nil, nil, RefreshTokenNotFoundError{}
+			}
+
+			return nil, nil, nil, errors.Wrap(err, "error finding refresh token for update")
+		}
+	}
+
+	// once the rows are locked (if forUpdate was true), we can query again using pop
 	if err := tx.Where("token = ?", token).First(refreshToken); err != nil {
 		if errors.Cause(err) == sql.ErrNoRows {
 			return nil, nil, nil, RefreshTokenNotFoundError{}
@@ -436,8 +539,12 @@ func FindUserWithRefreshToken(tx *storage.Connection, token string) (*User, *Ref
 		sessionId := *refreshToken.SessionId
 
 		if sessionId != uuid.Nil {
-			session, err = FindSessionByID(tx, sessionId)
+			session, err = FindSessionByID(tx, sessionId, forUpdate)
 			if err != nil {
+				if forUpdate {
+					return nil, nil, nil, err
+				}
+
 				if !IsNotFoundError(err) {
 					return nil, nil, nil, errors.Wrap(err, "error finding session from refresh token")
 				}
@@ -482,8 +589,8 @@ func FindUsersInAudience(tx *storage.Connection, aud string, pageParams *Paginat
 func FindUserByEmailChangeCurrentAndAudience(tx *storage.Connection, email, token, aud string) (*User, error) {
 	return findUser(
 		tx,
-		"instance_id = ? and LOWER(email) = ? and email_change_token_current = ? and aud = ? and is_sso_user = false",
-		uuid.Nil, strings.ToLower(email), token, aud,
+		"instance_id = ? and LOWER(email) = ? and aud = ? and is_sso_user = false and (email_change_token_current = 'pkce_' || ? or email_change_token_current = ?)",
+		uuid.Nil, strings.ToLower(email), aud, token, token,
 	)
 }
 
@@ -491,8 +598,8 @@ func FindUserByEmailChangeCurrentAndAudience(tx *storage.Connection, email, toke
 func FindUserByEmailChangeNewAndAudience(tx *storage.Connection, email, token, aud string) (*User, error) {
 	return findUser(
 		tx,
-		"instance_id = ? and LOWER(email_change) = ? and email_change_token_new = ? and aud = ? and is_sso_user = false",
-		uuid.Nil, strings.ToLower(email), token, aud,
+		"instance_id = ? and LOWER(email_change) = ? and aud = ? and is_sso_user = false and (email_change_token_new = 'pkce_' || ? or email_change_token_new = ?)",
+		uuid.Nil, strings.ToLower(email), aud, token, token,
 	)
 }
 
@@ -514,7 +621,8 @@ func FindUserByPhoneChangeAndAudience(tx *storage.Connection, phone, aud string)
 }
 
 // IsDuplicatedEmail returns whether a user exists with a matching email and audience.
-func IsDuplicatedEmail(tx *storage.Connection, email, aud string) (*User, error) {
+// If a currentUser is provided, we will need to filter out any identities that belong to the current user.
+func IsDuplicatedEmail(tx *storage.Connection, email, aud string, currentUser *User) (*User, error) {
 	var identities []Identity
 
 	if err := tx.Eager().Q().Where("email = ?", strings.ToLower(email)).All(&identities); err != nil {
@@ -527,19 +635,27 @@ func IsDuplicatedEmail(tx *storage.Connection, email, aud string) (*User, error)
 
 	userIDs := make(map[string]uuid.UUID)
 	for _, identity := range identities {
-		if !identity.IsForSSOProvider() {
-			userIDs[identity.UserID.String()] = identity.UserID
+		if _, ok := userIDs[identity.UserID.String()]; !ok {
+			if !identity.IsForSSOProvider() {
+				userIDs[identity.UserID.String()] = identity.UserID
+			}
 		}
 	}
 
-	for _, userID := range userIDs {
-		user, err := FindUserByID(tx, userID)
-		if err != nil && !IsNotFoundError(err) {
-			return nil, errors.Wrap(err, "unable to find user from email identity for duplicates")
-		}
+	var currentUserId uuid.UUID
+	if currentUser != nil {
+		currentUserId = currentUser.ID
+	}
 
-		if user.Aud == aud {
-			return user, nil
+	for _, userID := range userIDs {
+		if userID != currentUserId {
+			user, err := FindUserByID(tx, userID)
+			if err != nil {
+				return nil, errors.Wrap(err, "unable to find user from email identity for duplicates")
+			}
+			if user.Aud == aud {
+				return user, nil
+			}
 		}
 	}
 
@@ -547,7 +663,7 @@ func IsDuplicatedEmail(tx *storage.Connection, email, aud string) (*User, error)
 	// identities table we also do a final check on the users table
 	user, err := FindUserByEmailAndAudience(tx, email, aud)
 	if err != nil && !IsNotFoundError(err) {
-		return nil, errors.Wrap(err, "unable to find user email addres for duplicates")
+		return nil, errors.Wrap(err, "unable to find user email address for duplicates")
 	}
 
 	return user, nil
@@ -589,58 +705,38 @@ func (u *User) UpdateBannedUntil(tx *storage.Connection) error {
 }
 
 // RemoveUnconfirmedIdentities removes potentially malicious unconfirmed identities from a user (if any)
-func (u *User) RemoveUnconfirmedIdentities(tx *storage.Connection) error {
-	if u.IsConfirmed() {
-		return nil
-	}
-
+func (u *User) RemoveUnconfirmedIdentities(tx *storage.Connection, identity *Identity) error {
+	// user is unconfirmed so the password should be reset
 	u.EncryptedPassword = ""
-
 	if terr := tx.UpdateOnly(u, "encrypted_password"); terr != nil {
 		return terr
 	}
 
-	if providersList, ok := u.AppMetaData["providers"].([]string); ok {
-		// user has "providers" metadata, and the "email" provider
-		// should be removed from it
+	// user is unconfirmed so existing user_metadata should be overwritten
+	// to use the current identity metadata
+	u.UserMetaData = identity.IdentityData
+	if terr := u.UpdateUserMetaData(tx, u.UserMetaData); terr != nil {
+		return terr
+	}
 
-		var confirmedProviders []string
-
-		for _, provider := range providersList {
-			if provider != "email" {
-				confirmedProviders = append(confirmedProviders, provider)
-			}
-		}
-
-		u.AppMetaData["providers"] = confirmedProviders
-
-		if len(confirmedProviders) > 0 {
-			u.AppMetaData["provider"] = confirmedProviders[0]
-		} else {
-			u.AppMetaData["provider"] = nil
-		}
-
+	// user is unconfirmed so none of the providers associated to it are verified yet
+	// only the current provider should be kept
+	if _, ok := u.AppMetaData["providers"].([]string); ok {
+		u.AppMetaData["providers"] = []string{identity.Provider}
+		u.AppMetaData["provider"] = identity.Provider
 		if terr := u.UpdateAppMetaData(tx, u.AppMetaData); terr != nil {
 			return terr
 		}
 	}
 
-	// finally, remove any identity with the "email" provider
-
-	var confirmedProviders []Identity
-
-	for i, identity := range u.Identities {
-		if identity.Provider == "email" {
+	// finally, remove all identities except the current identity being authenticated
+	for i := range u.Identities {
+		if u.Identities[i].ID != identity.ID {
 			if terr := tx.Destroy(&u.Identities[i]); terr != nil {
 				return terr
 			}
-		} else {
-			confirmedProviders = append(confirmedProviders, identity)
 		}
 	}
-
-	u.Identities = confirmedProviders
-
 	return nil
 }
 
@@ -722,10 +818,9 @@ func (u *User) SoftDeleteUserIdentities(tx *storage.Connection) error {
 		if err := tx.RawQuery(
 			"update "+
 				(&pop.Model{Value: Identity{}}).TableName()+
-				" set id = ? where id = ? and provider = ?",
-			obfuscateIdentityId(identity),
+				" set provider_id = ? where id = ?",
+			obfuscateIdentityProviderId(identity),
 			identity.ID,
-			identity.Provider,
 		).Exec(); err != nil {
 			return err
 		}
@@ -747,6 +842,6 @@ func obfuscatePhone(u *User, phone string) string {
 	return obfuscateValue(u.ID, phone)[:15]
 }
 
-func obfuscateIdentityId(identity *Identity) string {
-	return obfuscateValue(identity.UserID, identity.Provider+":"+identity.ID)
+func obfuscateIdentityProviderId(identity *Identity) string {
+	return obfuscateValue(identity.UserID, identity.Provider+":"+identity.ProviderID)
 }

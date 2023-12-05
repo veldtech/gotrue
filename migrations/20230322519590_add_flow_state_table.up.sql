@@ -15,5 +15,6 @@ create table if not exists flow_state(
     created_at timestamptz null,
     updated_at timestamptz null
 );
-create index idx_auth_code on flow_state(auth_code);
+
+create index if not exists idx_auth_code on flow_state(auth_code);
 comment on table flow_state is 'stores metadata for oauth provider logins';

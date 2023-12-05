@@ -350,7 +350,7 @@ func (ts *AdminTestSuite) TestAdminUserCreate() {
 				expectedPassword = fmt.Sprintf("%v", c.params["password"])
 			}
 
-			assert.Equal(ts.T(), c.expected["isAuthenticated"], u.Authenticate(expectedPassword))
+			assert.Equal(ts.T(), c.expected["isAuthenticated"], u.Authenticate(context.Background(), expectedPassword))
 
 			// remove created user after each case
 			require.NoError(ts.T(), ts.API.db.Destroy(u))
@@ -438,7 +438,7 @@ func (ts *AdminTestSuite) TestAdminUserUpdate() {
 
 	for _, identity := range u.Identities {
 		// for email & phone identities, the providerId is the same as the userId
-		require.Equal(ts.T(), u.ID.String(), identity.ID)
+		require.Equal(ts.T(), u.ID.String(), identity.ProviderID)
 		require.Equal(ts.T(), u.ID, identity.UserID)
 		if identity.Provider == "email" {
 			require.Equal(ts.T(), newEmail, identity.IdentityData["email"])
@@ -456,7 +456,7 @@ func (ts *AdminTestSuite) TestAdminUserUpdatePasswordFailed() {
 	require.NoError(ts.T(), ts.API.db.Create(u), "Error creating user")
 
 	var updateEndpoint = fmt.Sprintf("/admin/users/%s", u.ID)
-	ts.Config.PasswordMinLength = 6
+	ts.Config.Password.MinLength = 6
 	ts.Run("Password doesn't meet minimum length", func() {
 		var buffer bytes.Buffer
 		require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(map[string]interface{}{
@@ -479,7 +479,7 @@ func (ts *AdminTestSuite) TestAdminUserUpdateBannedUntilFailed() {
 	require.NoError(ts.T(), ts.API.db.Create(u), "Error creating user")
 
 	var updateEndpoint = fmt.Sprintf("/admin/users/%s", u.ID)
-	ts.Config.PasswordMinLength = 6
+	ts.Config.Password.MinLength = 6
 	ts.Run("Incorrect format for ban_duration", func() {
 		var buffer bytes.Buffer
 		require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(map[string]interface{}{
@@ -545,7 +545,7 @@ func (ts *AdminTestSuite) TestAdminUserDelete() {
 			desc:         "Test admin delete user (soft deletion & sso user)",
 			isSoftDelete: "?is_soft_delete=true",
 			isSSOUser:    true,
-			expected:     expected{code: http.StatusBadRequest, err: nil},
+			expected:     expected{code: http.StatusOK, err: nil},
 			body: map[string]interface{}{
 				"should_soft_delete": true,
 			},
@@ -556,7 +556,9 @@ func (ts *AdminTestSuite) TestAdminUserDelete() {
 		ts.Run(c.desc, func() {
 			var buffer bytes.Buffer
 			require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(c.body))
-			u, err := ts.API.signupNewUser(context.Background(), ts.API.db, signupParams, c.isSSOUser)
+			u, err := signupParams.ToUserModel(false /* <- isSSOUser */)
+			require.NoError(ts.T(), err)
+			u, err = ts.API.signupNewUser(context.Background(), ts.API.db, u)
 			require.NoError(ts.T(), err)
 
 			// Setup request
@@ -705,7 +707,8 @@ func (ts *AdminTestSuite) TestAdminUserCreateWithDisabledLogin() {
 			req := httptest.NewRequest(http.MethodPost, "/admin/users", &buffer)
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", ts.token))
 
-			*ts.Config = *c.customConfig
+			ts.Config.JWT = c.customConfig.JWT
+			ts.Config.External = c.customConfig.External
 			ts.API.handler.ServeHTTP(w, req)
 			require.Equal(ts.T(), c.expected, w.Code)
 		})

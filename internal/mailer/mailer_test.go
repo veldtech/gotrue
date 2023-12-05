@@ -1,6 +1,7 @@
 package mailer
 
 import (
+	"net/url"
 	"regexp"
 	"testing"
 
@@ -13,27 +14,58 @@ func enforceRelativeURL(url string) string {
 	return urlRegexp.ReplaceAllString(url, "")
 }
 
-func TestGetSiteURL(t *testing.T) {
+func TestGetPath(t *testing.T) {
+	params := EmailParams{
+		Token:      "token",
+		Type:       "signup",
+		RedirectTo: "https://example.com",
+	}
 	cases := []struct {
-		ReferrerURL string
-		SiteURL     string
-		Path        string
-		Fragment    string
-		Expected    string
+		SiteURL  string
+		Path     string
+		Params   *EmailParams
+		Expected string
 	}{
-		{"", "https://test.example.com", "/templates/confirm.html", "", "https://test.example.com/templates/confirm.html"},
-		{"", "https://test.example.com/removedpath", "/templates/confirm.html", "", "https://test.example.com/templates/confirm.html"},
-		{"", "https://test.example.com/", "/trailingslash/", "", "https://test.example.com/trailingslash/"},
-		{"", "https://test.example.com", "f", "fragment", "https://test.example.com/f?fragment"},
-		{"https://test.example.com/admin", "https://test.example.com", "", "fragment", "https://test.example.com/admin?fragment"},
-		{"https://test.example.com/admin", "https://test.example.com", "f", "fragment", "https://test.example.com/f?fragment"},
-		{"", "https://test.example.com", "", "fragment", "https://test.example.com?fragment"},
+		{
+			SiteURL:  "https://test.example.com",
+			Path:     "/templates/confirm.html",
+			Params:   nil,
+			Expected: "https://test.example.com/templates/confirm.html",
+		},
+		{
+			SiteURL:  "https://test.example.com/removedpath",
+			Path:     "/templates/confirm.html",
+			Params:   nil,
+			Expected: "https://test.example.com/templates/confirm.html",
+		},
+		{
+			SiteURL:  "https://test.example.com/",
+			Path:     "/trailingslash/",
+			Params:   nil,
+			Expected: "https://test.example.com/trailingslash/",
+		},
+		{
+			SiteURL:  "https://test.example.com",
+			Path:     "f",
+			Params:   &params,
+			Expected: "https://test.example.com/f?token=token&type=signup&redirect_to=https://example.com",
+		},
+		{
+			SiteURL:  "https://test.example.com",
+			Path:     "",
+			Params:   &params,
+			Expected: "https://test.example.com?token=token&type=signup&redirect_to=https://example.com",
+		},
 	}
 
 	for _, c := range cases {
-		act, err := getSiteURL(c.ReferrerURL, c.SiteURL, c.Path, c.Fragment)
-		assert.NoError(t, err, c.Expected)
-		assert.Equal(t, c.Expected, act)
+		u, err := url.ParseRequestURI(c.SiteURL)
+		assert.NoError(t, err, "error parsing URI request")
+
+		path, err := getPath(c.Path, c.Params)
+
+		assert.NoError(t, err)
+		assert.Equal(t, c.Expected, u.ResolveReference(path).String())
 	}
 }
 

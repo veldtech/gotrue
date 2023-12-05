@@ -11,10 +11,6 @@ func IsNotFoundError(err error) bool {
 		return true
 	case RefreshTokenNotFoundError, *RefreshTokenNotFoundError:
 		return true
-	case InstanceNotFoundError, *InstanceNotFoundError:
-		return true
-	case TotpSecretNotFoundError, *TotpSecretNotFoundError:
-		return true
 	case IdentityNotFoundError, *IdentityNotFoundError:
 		return true
 	case ChallengeNotFoundError, *ChallengeNotFoundError:
@@ -51,6 +47,13 @@ func (e IdentityNotFoundError) Error() string {
 	return "Identity not found"
 }
 
+// ConfirmationOrRecoveryTokenNotFoundError represents when a confirmation or recovery token is not found.
+type ConfirmationOrRecoveryTokenNotFoundError struct{}
+
+func (e ConfirmationOrRecoveryTokenNotFoundError) Error() string {
+	return "Confirmation or Recovery Token not found"
+}
+
 // ConfirmationTokenNotFoundError represents when a confirmation token is not found.
 type ConfirmationTokenNotFoundError struct{}
 
@@ -65,13 +68,6 @@ func (e RefreshTokenNotFoundError) Error() string {
 	return "Refresh Token not found"
 }
 
-// InstanceNotFoundError represents when an instance is not found.
-type InstanceNotFoundError struct{}
-
-func (e InstanceNotFoundError) Error() string {
-	return "Instance not found"
-}
-
 // FactorNotFoundError represents when a user is not found.
 type FactorNotFoundError struct{}
 
@@ -84,12 +80,6 @@ type ChallengeNotFoundError struct{}
 
 func (e ChallengeNotFoundError) Error() string {
 	return "Challenge not found"
-}
-
-type TotpSecretNotFoundError struct{}
-
-func (e TotpSecretNotFoundError) Error() string {
-	return "Totp Secret not found"
 }
 
 // SSOProviderNotFoundError represents an error when a SSO Provider can't be
@@ -114,4 +104,18 @@ type FlowStateNotFoundError struct{}
 
 func (e FlowStateNotFoundError) Error() string {
 	return "Flow State not found"
+}
+
+func IsUniqueConstraintViolatedError(err error) bool {
+	switch err.(type) {
+	case UserEmailUniqueConflictError, *UserEmailUniqueConflictError:
+		return true
+	}
+	return false
+}
+
+type UserEmailUniqueConflictError struct{}
+
+func (e UserEmailUniqueConflictError) Error() string {
+	return "User email unique constraint violated"
 }

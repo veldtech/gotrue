@@ -1,1 +1,1 @@
-drop index refresh_tokens_token_idx;
+drop index if exists refresh_tokens_token_idx;

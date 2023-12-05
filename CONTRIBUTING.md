@@ -1,7 +1,6 @@
 # CONTRIBUTING
 
 We would love to have contributions from each and every one of you in the community be it big or small and you are the ones who motivate us to do better than what we do today.
-Docs aren't perfect and so we're here to help. If you're stuck on setup for more than thirty minutes please feel free to reach out on the `#gotrue` channel on [the Supabase discord](https://discord.gg/tNy8sVEf)
 
 ## Code Of Conduct
 
@@ -60,11 +59,11 @@ Therefore, to contribute to GoTrue you will need to install these tools.
 
 ### Install Tools
 
-- Install [Go](https://go.dev) 1.16
+- Install [Go](https://go.dev) 1.21
 
 ```terminal
 # Via Homebrew on OSX
-brew install go@1.16
+brew install go@1.21
 
 # Set the GOPATH environment variable in the ~/.zshrc file
 export GOPATH="$HOME/go"
@@ -519,6 +518,8 @@ We actively welcome your pull requests.
 - Have you written some tests for your PR?
 
 ## Guidelines for Implementing Additional OAuth Providers
+
+> ⚠️ We won't be accepting any additional oauth / sms provider contributions for now because we intend to support these through webhooks or a generic provider in the future.
 
 Please ensure that an end-to-end test is done for the OAuth provider implemented.
 

@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/supabase/gotrue/internal/conf"
+	"github.com/supabase/gotrue/internal/crypto"
 	"github.com/supabase/gotrue/internal/models"
 )
 
@@ -127,76 +127,133 @@ func (ts *VerifyTestSuite) TestVerifyPasswordRecovery() {
 }
 
 func (ts *VerifyTestSuite) TestVerifySecureEmailChange() {
-	u, err := models.FindUserByEmailAndAudience(ts.API.db, "test@example.com", ts.Config.JWT.Aud)
-	require.NoError(ts.T(), err)
-	u.EmailChangeSentAt = &time.Time{}
-	require.NoError(ts.T(), ts.API.db.Update(u))
+	currentEmail := "test@example.com"
+	newEmail := "new@example.com"
 
-	// Request body
-	var buffer bytes.Buffer
-	require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(map[string]interface{}{
-		"email": "new@example.com",
-	}))
+	// Change from new email to current email and back to new email
+	cases := []struct {
+		desc         string
+		body         map[string]interface{}
+		isPKCE       bool
+		currentEmail string
+		newEmail     string
+	}{
+		{
+			desc: "Implict Flow Email Change",
+			body: map[string]interface{}{
+				"email": newEmail,
+			},
+			isPKCE:       false,
+			currentEmail: currentEmail,
+			newEmail:     newEmail,
+		},
+		{
+			desc: "PKCE Email Change",
+			body: map[string]interface{}{
+				"email": currentEmail,
+				// Code Challenge needs to be at least 43 characters long
+				"code_challenge":        "6b151854-cc15-4e29-8db7-3d3a9f15b3066b151854-cc15-4e29-8db7-3d3a9f15b306",
+				"code_challenge_method": models.SHA256.String(),
+			},
+			isPKCE:       true,
+			currentEmail: newEmail,
+			newEmail:     currentEmail,
+		},
+	}
 
-	// Setup request
-	req := httptest.NewRequest(http.MethodPut, "http://localhost/user", &buffer)
-	req.Header.Set("Content-Type", "application/json")
+	for _, c := range cases {
+		u, err := models.FindUserByEmailAndAudience(ts.API.db, c.currentEmail, ts.Config.JWT.Aud)
+		require.NoError(ts.T(), err)
 
-	// Generate access token for request
-	var token string
-	token, err = generateAccessToken(ts.API.db, u, nil, time.Second*time.Duration(ts.Config.JWT.Exp), ts.Config.JWT.Secret)
-	require.NoError(ts.T(), err)
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+		u.EmailChangeSentAt = &time.Time{}
+		require.NoError(ts.T(), ts.API.db.Update(u))
 
-	// Setup response recorder
-	w := httptest.NewRecorder()
-	ts.API.handler.ServeHTTP(w, req)
-	assert.Equal(ts.T(), http.StatusOK, w.Code)
+		// Request body
+		var buffer bytes.Buffer
+		require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(c.body))
 
-	u, err = models.FindUserByEmailAndAudience(ts.API.db, "test@example.com", ts.Config.JWT.Aud)
-	require.NoError(ts.T(), err)
+		// Setup request
+		req := httptest.NewRequest(http.MethodPut, "http://localhost/user", &buffer)
+		req.Header.Set("Content-Type", "application/json")
 
-	assert.WithinDuration(ts.T(), time.Now(), *u.EmailChangeSentAt, 1*time.Second)
-	assert.False(ts.T(), u.IsConfirmed())
+		// Generate access token for request
+		var token string
+		token, _, err = generateAccessToken(ts.API.db, u, nil, &ts.Config.JWT)
+		require.NoError(ts.T(), err)
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
-	// Verify new email
-	reqURL := fmt.Sprintf("http://localhost/verify?type=%s&token=%s", emailChangeVerification, u.EmailChangeTokenNew)
-	req = httptest.NewRequest(http.MethodGet, reqURL, nil)
+		// Setup response recorder
+		w := httptest.NewRecorder()
+		ts.API.handler.ServeHTTP(w, req)
+		assert.Equal(ts.T(), http.StatusOK, w.Code)
 
-	w = httptest.NewRecorder()
-	ts.API.handler.ServeHTTP(w, req)
+		u, err = models.FindUserByEmailAndAudience(ts.API.db, c.currentEmail, ts.Config.JWT.Aud)
+		require.NoError(ts.T(), err)
 
-	require.Equal(ts.T(), http.StatusSeeOther, w.Code)
-	urlVal, err := url.Parse(w.Result().Header.Get("Location"))
-	ts.Require().NoError(err, "redirect url parse failed")
-	v, err := url.ParseQuery(urlVal.Fragment)
-	ts.Require().NoError(err)
-	ts.Require().NotEmpty(v.Get("message"))
+		assert.WithinDuration(ts.T(), time.Now(), *u.EmailChangeSentAt, 1*time.Second)
+		assert.False(ts.T(), u.IsConfirmed())
 
-	u, err = models.FindUserByEmailAndAudience(ts.API.db, "test@example.com", ts.Config.JWT.Aud)
-	require.NoError(ts.T(), err)
-	assert.Equal(ts.T(), singleConfirmation, u.EmailChangeConfirmStatus)
+		// Verify new email
+		reqURL := fmt.Sprintf("http://localhost/verify?type=%s&token=%s", emailChangeVerification, u.EmailChangeTokenNew)
+		req = httptest.NewRequest(http.MethodGet, reqURL, nil)
 
-	// Verify old email
-	reqURL = fmt.Sprintf("http://localhost/verify?type=%s&token=%s", emailChangeVerification, u.EmailChangeTokenCurrent)
-	req = httptest.NewRequest(http.MethodGet, reqURL, nil)
+		w = httptest.NewRecorder()
+		ts.API.handler.ServeHTTP(w, req)
 
-	w = httptest.NewRecorder()
-	ts.API.handler.ServeHTTP(w, req)
-	require.Equal(ts.T(), http.StatusSeeOther, w.Code)
+		require.Equal(ts.T(), http.StatusSeeOther, w.Code)
+		urlVal, err := url.Parse(w.Result().Header.Get("Location"))
+		ts.Require().NoError(err, "redirect url parse failed")
+		var v url.Values
+		if !c.isPKCE {
+			v, err = url.ParseQuery(urlVal.Fragment)
+			ts.Require().NoError(err)
+			ts.Require().NotEmpty(v.Get("message"))
+		} else if c.isPKCE {
+			v, err = url.ParseQuery(urlVal.RawQuery)
+			ts.Require().NoError(err)
+			ts.Require().NotEmpty(v.Get("message"))
 
-	urlVal, err = url.Parse(w.Header().Get("Location"))
-	ts.Require().NoError(err, "redirect url parse failed")
-	v, err = url.ParseQuery(urlVal.Fragment)
-	ts.Require().NoError(err)
-	ts.Require().NotEmpty(v.Get("access_token"))
-	ts.Require().NotEmpty(v.Get("expires_in"))
-	ts.Require().NotEmpty(v.Get("refresh_token"))
+			v, err = url.ParseQuery(urlVal.Fragment)
+			ts.Require().NoError(err)
+			ts.Require().NotEmpty(v.Get("message"))
+		}
 
-	// user's email should've been updated to new@example.com
-	u, err = models.FindUserByEmailAndAudience(ts.API.db, "new@example.com", ts.Config.JWT.Aud)
-	require.NoError(ts.T(), err)
-	require.Equal(ts.T(), zeroConfirmation, u.EmailChangeConfirmStatus)
+		u, err = models.FindUserByEmailAndAudience(ts.API.db, c.currentEmail, ts.Config.JWT.Aud)
+		require.NoError(ts.T(), err)
+		assert.Equal(ts.T(), singleConfirmation, u.EmailChangeConfirmStatus)
+
+		// Verify old email
+		reqURL = fmt.Sprintf("http://localhost/verify?type=%s&token=%s", emailChangeVerification, u.EmailChangeTokenCurrent)
+		req = httptest.NewRequest(http.MethodGet, reqURL, nil)
+
+		w = httptest.NewRecorder()
+		ts.API.handler.ServeHTTP(w, req)
+		require.Equal(ts.T(), http.StatusSeeOther, w.Code)
+
+		urlVal, err = url.Parse(w.Header().Get("Location"))
+		ts.Require().NoError(err, "redirect url parse failed")
+		if !c.isPKCE {
+			v, err = url.ParseQuery(urlVal.Fragment)
+			ts.Require().NoError(err)
+			ts.Require().NotEmpty(v.Get("access_token"))
+			ts.Require().NotEmpty(v.Get("expires_in"))
+			ts.Require().NotEmpty(v.Get("refresh_token"))
+		} else if c.isPKCE {
+			v, err = url.ParseQuery(urlVal.RawQuery)
+			ts.Require().NoError(err)
+			ts.Require().NotEmpty(v.Get("code"))
+		}
+
+		// user's email should've been updated to newEmail
+		u, err = models.FindUserByEmailAndAudience(ts.API.db, c.newEmail, ts.Config.JWT.Aud)
+		require.NoError(ts.T(), err)
+		require.Equal(ts.T(), zeroConfirmation, u.EmailChangeConfirmStatus)
+
+		// Reset confirmation status after each test
+		u.EmailConfirmedAt = nil
+		require.NoError(ts.T(), ts.API.db.Update(u))
+
+	}
 }
 
 func (ts *VerifyTestSuite) TestExpiredConfirmationToken() {
@@ -296,7 +353,9 @@ func (ts *VerifyTestSuite) TestInvalidOtp() {
 		},
 	}
 
-	for _, c := range cases {
+	for _, caseItem := range cases {
+		c := caseItem
+
 		ts.Run(c.desc, func() {
 			// update token sent time
 			sentTime = time.Now()
@@ -563,7 +622,6 @@ func (ts *VerifyTestSuite) TestVerifySignupWithredirectURLContainedPath() {
 }
 
 func (ts *VerifyTestSuite) TestVerifyPKCEOTP() {
-
 	u, err := models.FindUserByEmailAndAudience(ts.API.db, "test@example.com", ts.Config.JWT.Aud)
 	require.NoError(ts.T(), err)
 	u.ConfirmationToken = "pkce_confirmation_token"
@@ -715,11 +773,8 @@ func (ts *VerifyTestSuite) TestVerifyValidOtp() {
 	require.NoError(ts.T(), ts.API.db.Update(u))
 
 	type expected struct {
-		code int
-	}
-
-	expectedResponse := expected{
-		code: http.StatusOK,
+		code      int
+		tokenHash string
 	}
 
 	cases := []struct {
@@ -733,80 +788,135 @@ func (ts *VerifyTestSuite) TestVerifyValidOtp() {
 			sentTime: time.Now(),
 			body: map[string]interface{}{
 				"type":      smsVerification,
-				"tokenHash": fmt.Sprintf("%x", sha256.Sum224([]byte(u.GetPhone()+"123456"))),
+				"tokenHash": crypto.GenerateTokenHash(u.GetPhone(), "123456"),
 				"token":     "123456",
 				"phone":     u.GetPhone(),
 			},
-			expected: expectedResponse,
+			expected: expected{
+				code:      http.StatusOK,
+				tokenHash: crypto.GenerateTokenHash(u.GetPhone(), "123456"),
+			},
 		},
 		{
 			desc:     "Valid Confirmation OTP",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
 				"type":      signupVerification,
-				"tokenHash": fmt.Sprintf("%x", sha256.Sum224([]byte(u.GetEmail()+"123456"))),
+				"tokenHash": crypto.GenerateTokenHash(u.GetEmail(), "123456"),
 				"token":     "123456",
 				"email":     u.GetEmail(),
 			},
-			expected: expectedResponse,
+			expected: expected{
+				code:      http.StatusOK,
+				tokenHash: crypto.GenerateTokenHash(u.GetEmail(), "123456"),
+			},
 		},
 		{
 			desc:     "Valid Recovery OTP",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
 				"type":      recoveryVerification,
-				"tokenHash": fmt.Sprintf("%x", sha256.Sum224([]byte(u.GetEmail()+"123456"))),
+				"tokenHash": crypto.GenerateTokenHash(u.GetEmail(), "123456"),
 				"token":     "123456",
 				"email":     u.GetEmail(),
 			},
-			expected: expectedResponse,
+			expected: expected{
+				code:      http.StatusOK,
+				tokenHash: crypto.GenerateTokenHash(u.GetEmail(), "123456"),
+			},
 		},
 		{
 			desc:     "Valid Email OTP",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
 				"type":      emailOTPVerification,
-				"tokenHash": fmt.Sprintf("%x", sha256.Sum224([]byte(u.GetEmail()+"123456"))),
+				"tokenHash": crypto.GenerateTokenHash(u.GetEmail(), "123456"),
 				"token":     "123456",
 				"email":     u.GetEmail(),
 			},
-			expected: expectedResponse,
+			expected: expected{
+				code:      http.StatusOK,
+				tokenHash: crypto.GenerateTokenHash(u.GetEmail(), "123456"),
+			},
 		},
 		{
 			desc:     "Valid Email Change OTP",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
 				"type":      emailChangeVerification,
-				"tokenHash": fmt.Sprintf("%x", sha256.Sum224([]byte(u.EmailChange+"123456"))),
+				"tokenHash": crypto.GenerateTokenHash(u.EmailChange, "123456"),
 				"token":     "123456",
 				"email":     u.EmailChange,
 			},
-			expected: expectedResponse,
+			expected: expected{
+				code:      http.StatusOK,
+				tokenHash: crypto.GenerateTokenHash(u.EmailChange, "123456"),
+			},
 		},
 		{
 			desc:     "Valid Phone Change OTP",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
 				"type":      phoneChangeVerification,
-				"tokenHash": fmt.Sprintf("%x", sha256.Sum224([]byte(u.PhoneChange+"123456"))),
+				"tokenHash": crypto.GenerateTokenHash(u.PhoneChange, "123456"),
 				"token":     "123456",
 				"phone":     u.PhoneChange,
 			},
-			expected: expectedResponse,
+			expected: expected{
+				code:      http.StatusOK,
+				tokenHash: crypto.GenerateTokenHash(u.PhoneChange, "123456"),
+			},
+		},
+		{
+			desc:     "Valid Signup Token Hash",
+			sentTime: time.Now(),
+			body: map[string]interface{}{
+				"type":       signupVerification,
+				"token_hash": crypto.GenerateTokenHash(u.GetEmail(), "123456"),
+			},
+			expected: expected{
+				code:      http.StatusOK,
+				tokenHash: crypto.GenerateTokenHash(u.GetEmail(), "123456"),
+			},
+		},
+		{
+			desc:     "Valid Email Change Token Hash",
+			sentTime: time.Now(),
+			body: map[string]interface{}{
+				"type":       emailChangeVerification,
+				"token_hash": crypto.GenerateTokenHash(u.EmailChange, "123456"),
+			},
+			expected: expected{
+				code:      http.StatusOK,
+				tokenHash: crypto.GenerateTokenHash(u.EmailChange, "123456"),
+			},
+		},
+		{
+			desc:     "Valid Email Verification Type",
+			sentTime: time.Now(),
+			body: map[string]interface{}{
+				"type":       emailOTPVerification,
+				"token_hash": crypto.GenerateTokenHash(u.GetEmail(), "123456"),
+			},
+			expected: expected{
+				code:      http.StatusOK,
+				tokenHash: crypto.GenerateTokenHash(u.GetEmail(), "123456"),
+			},
 		},
 	}
 
-	for _, c := range cases {
+	for _, caseItem := range cases {
+		c := caseItem
 		ts.Run(c.desc, func() {
 			// create user
 			u.ConfirmationSentAt = &c.sentTime
 			u.RecoverySentAt = &c.sentTime
 			u.EmailChangeSentAt = &c.sentTime
 			u.PhoneChangeSentAt = &c.sentTime
-			u.ConfirmationToken = c.body["tokenHash"].(string)
-			u.RecoveryToken = c.body["tokenHash"].(string)
-			u.EmailChangeTokenNew = c.body["tokenHash"].(string)
-			u.PhoneChangeToken = c.body["tokenHash"].(string)
+			u.ConfirmationToken = c.expected.tokenHash
+			u.RecoveryToken = c.expected.tokenHash
+			u.EmailChangeTokenNew = c.expected.tokenHash
+			u.PhoneChangeToken = c.expected.tokenHash
 			require.NoError(ts.T(), ts.API.db.Update(u))
 
 			var buffer bytes.Buffer
@@ -820,6 +930,256 @@ func (ts *VerifyTestSuite) TestVerifyValidOtp() {
 			w := httptest.NewRecorder()
 			ts.API.handler.ServeHTTP(w, req)
 			assert.Equal(ts.T(), c.expected.code, w.Code)
+		})
+	}
+}
+
+func (ts *VerifyTestSuite) TestSecureEmailChangeWithTokenHash() {
+	ts.Config.Mailer.SecureEmailChangeEnabled = true
+	u, err := models.FindUserByEmailAndAudience(ts.API.db, "test@example.com", ts.Config.JWT.Aud)
+	require.NoError(ts.T(), err)
+	u.EmailChange = "new@example.com"
+	require.NoError(ts.T(), ts.API.db.Update(u))
+
+	currentEmailChangeToken := crypto.GenerateTokenHash(string(u.Email), "123456")
+	newEmailChangeToken := crypto.GenerateTokenHash(u.EmailChange, "123456")
+
+	cases := []struct {
+		desc                   string
+		firstVerificationBody  map[string]interface{}
+		secondVerificationBody map[string]interface{}
+		expectedStatus         int
+	}{
+		{
+			desc: "Secure Email Change with Token Hash (Success)",
+			firstVerificationBody: map[string]interface{}{
+				"type":       emailChangeVerification,
+				"token_hash": currentEmailChangeToken,
+			},
+			secondVerificationBody: map[string]interface{}{
+				"type":       emailChangeVerification,
+				"token_hash": newEmailChangeToken,
+			},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			desc: "Secure Email Change with Token Hash. Reusing a token hash twice should fail",
+			firstVerificationBody: map[string]interface{}{
+				"type":       emailChangeVerification,
+				"token_hash": currentEmailChangeToken,
+			},
+			secondVerificationBody: map[string]interface{}{
+				"type":       emailChangeVerification,
+				"token_hash": currentEmailChangeToken,
+			},
+			expectedStatus: http.StatusUnauthorized,
+		},
+	}
+	for _, c := range cases {
+		ts.Run(c.desc, func() {
+			// Set the corresponding email change tokens
+			u.EmailChangeTokenCurrent = currentEmailChangeToken
+			u.EmailChangeTokenNew = newEmailChangeToken
+
+			currentTime := time.Now()
+			u.EmailChangeSentAt = &currentTime
+			require.NoError(ts.T(), ts.API.db.Update(u))
+
+			var buffer bytes.Buffer
+			require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(c.firstVerificationBody))
+
+			// Setup request
+			req := httptest.NewRequest(http.MethodPost, "http://localhost/verify", &buffer)
+			req.Header.Set("Content-Type", "application/json")
+
+			// Setup response recorder
+			w := httptest.NewRecorder()
+			ts.API.handler.ServeHTTP(w, req)
+			require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(c.secondVerificationBody))
+
+			// Setup second request
+			req = httptest.NewRequest(http.MethodPost, "http://localhost/verify", &buffer)
+			req.Header.Set("Content-Type", "application/json")
+
+			// Setup second response recorder
+			w = httptest.NewRecorder()
+			ts.API.handler.ServeHTTP(w, req)
+			assert.Equal(ts.T(), c.expectedStatus, w.Code)
+		})
+
+	}
+
+}
+
+func (ts *VerifyTestSuite) TestPrepRedirectURL() {
+	escapedMessage := url.QueryEscape(singleConfirmationAccepted)
+	cases := []struct {
+		desc     string
+		message  string
+		rurl     string
+		flowType models.FlowType
+		expected string
+	}{
+		{
+			desc:     "(PKCE): Redirect URL with additional query params",
+			message:  singleConfirmationAccepted,
+			rurl:     "https://example.com/?first=another&second=other",
+			flowType: models.PKCEFlow,
+			expected: fmt.Sprintf("https://example.com/?first=another&message=%s&second=other#message=%s", escapedMessage, escapedMessage),
+		},
+		{
+			desc:     "(PKCE): Query params in redirect url are overriden",
+			message:  singleConfirmationAccepted,
+			rurl:     "https://example.com/?message=Valid+redirect+URL",
+			flowType: models.PKCEFlow,
+			expected: fmt.Sprintf("https://example.com/?message=%s#message=%s", escapedMessage, escapedMessage),
+		},
+		{
+			desc:     "(Implicit): plain redirect url",
+			message:  singleConfirmationAccepted,
+			rurl:     "https://example.com/",
+			flowType: models.ImplicitFlow,
+			expected: fmt.Sprintf("https://example.com/#message=%s", escapedMessage),
+		},
+		{
+			desc:     "(Implicit): query params retained",
+			message:  singleConfirmationAccepted,
+			rurl:     "https://example.com/?first=another",
+			flowType: models.ImplicitFlow,
+			expected: fmt.Sprintf("https://example.com/?first=another#message=%s", escapedMessage),
+		},
+	}
+	for _, c := range cases {
+		ts.Run(c.desc, func() {
+			rurl, err := ts.API.prepRedirectURL(c.message, c.rurl, c.flowType)
+			require.NoError(ts.T(), err)
+			require.Equal(ts.T(), c.expected, rurl)
+		})
+	}
+}
+
+func (ts *VerifyTestSuite) TestPrepErrorRedirectURL() {
+	const DefaultError = "Invalid redirect URL"
+	redirectError := fmt.Sprintf("error=invalid_request&error_code=400&error_description=%s", url.QueryEscape(DefaultError))
+
+	cases := []struct {
+		desc     string
+		message  string
+		rurl     string
+		flowType models.FlowType
+		expected string
+	}{
+		{
+			desc:     "(PKCE): Error in both query params and hash fragment",
+			message:  "Valid redirect URL",
+			rurl:     "https://example.com/",
+			flowType: models.PKCEFlow,
+			expected: fmt.Sprintf("https://example.com/?%s#%s", redirectError, redirectError),
+		},
+		{
+			desc:     "(PKCE): Error with conflicting query params in redirect url",
+			message:  DefaultError,
+			rurl:     "https://example.com/?error=Error+to+be+overriden",
+			flowType: models.PKCEFlow,
+			expected: fmt.Sprintf("https://example.com/?%s#%s", redirectError, redirectError),
+		},
+		{
+			desc:     "(Implicit): plain redirect url",
+			message:  DefaultError,
+			rurl:     "https://example.com/",
+			flowType: models.ImplicitFlow,
+			expected: fmt.Sprintf("https://example.com/#%s", redirectError),
+		},
+		{
+			desc:     "(Implicit): query params preserved",
+			message:  DefaultError,
+			rurl:     "https://example.com/?test=param",
+			flowType: models.ImplicitFlow,
+			expected: fmt.Sprintf("https://example.com/?test=param#%s", redirectError),
+		},
+	}
+	for _, c := range cases {
+		ts.Run(c.desc, func() {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "http://localhost", nil)
+			rurl, err := ts.API.prepErrorRedirectURL(badRequestError(DefaultError), w, req, c.rurl, c.flowType)
+			require.NoError(ts.T(), err)
+			require.Equal(ts.T(), c.expected, rurl)
+		})
+	}
+}
+
+func (ts *VerifyTestSuite) TestVerifyValidateParams() {
+	cases := []struct {
+		desc     string
+		params   *VerifyParams
+		method   string
+		expected error
+	}{
+		{
+			desc: "Successful GET Verify",
+			params: &VerifyParams{
+				Type:  "signup",
+				Token: "some-token-hash",
+			},
+			method:   http.MethodGet,
+			expected: nil,
+		},
+		{
+			desc: "Successful POST Verify (TokenHash)",
+			params: &VerifyParams{
+				Type:      "signup",
+				TokenHash: "some-token-hash",
+			},
+			method:   http.MethodPost,
+			expected: nil,
+		},
+		{
+			desc: "Successful POST Verify (Token)",
+			params: &VerifyParams{
+				Type:  "signup",
+				Token: "some-token",
+				Email: "email@example.com",
+			},
+			method:   http.MethodPost,
+			expected: nil,
+		},
+		// unsuccessful validations
+		{
+			desc: "Need to send email or phone number with token",
+			params: &VerifyParams{
+				Type:  "signup",
+				Token: "some-token",
+			},
+			method:   http.MethodPost,
+			expected: badRequestError("Only an email address or phone number should be provided on verify"),
+		},
+		{
+			desc: "Cannot send both TokenHash and Token",
+			params: &VerifyParams{
+				Type:      "signup",
+				Token:     "some-token",
+				TokenHash: "some-token-hash",
+			},
+			method:   http.MethodPost,
+			expected: badRequestError("Verify requires either a token or a token hash"),
+		},
+		{
+			desc: "No verification type specified",
+			params: &VerifyParams{
+				Token: "some-token",
+				Email: "email@example.com",
+			},
+			method:   http.MethodPost,
+			expected: badRequestError("Verify requires a verification type"),
+		},
+	}
+
+	for _, c := range cases {
+		ts.Run(c.desc, func() {
+			req := httptest.NewRequest(c.method, "http://localhost", nil)
+			err := c.params.Validate(req)
+			require.Equal(ts.T(), c.expected, err)
 		})
 	}
 }

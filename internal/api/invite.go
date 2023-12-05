@@ -8,6 +8,7 @@ import (
 	"github.com/supabase/gotrue/internal/api/provider"
 	"github.com/supabase/gotrue/internal/models"
 	"github.com/supabase/gotrue/internal/storage"
+	"github.com/supabase/gotrue/internal/utilities"
 )
 
 // InviteParams are the parameters the Signup endpoint accepts
@@ -56,7 +57,16 @@ func (a *API) Invite(w http.ResponseWriter, r *http.Request) error {
 				Aud:      aud,
 				Provider: "email",
 			}
-			user, err = a.signupNewUser(ctx, tx, &signupParams, false /* <- isSSOUser */)
+
+			// because params above sets no password, this method
+			// is not computationally hard so it can be used within
+			// a database transaction
+			user, err = signupParams.ToUserModel(false /* <- isSSOUser */)
+			if err != nil {
+				return err
+			}
+
+			user, err = a.signupNewUser(ctx, tx, user)
 			if err != nil {
 				return err
 			}
@@ -78,8 +88,9 @@ func (a *API) Invite(w http.ResponseWriter, r *http.Request) error {
 		}
 
 		mailer := a.Mailer(ctx)
-		referrer := a.getReferrer(r)
-		if err := sendInvite(tx, user, mailer, referrer, config.Mailer.OtpLength); err != nil {
+		referrer := utilities.GetReferrer(r, config)
+		externalURL := getExternalHost(ctx)
+		if err := sendInvite(tx, user, mailer, referrer, externalURL, config.Mailer.OtpLength); err != nil {
 			return internalServerError("Error inviting user").WithInternalError(err)
 		}
 		return nil
